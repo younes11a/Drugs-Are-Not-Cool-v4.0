@@ -1,4 +1,4 @@
-# Drugs-Are-Not-Cool-v6.1
+# Drugs-Are-Not-Cool-v4.0
 
 "Drugs Are Not Cool" is a text-based drug dealer simulation written in Python for the terminal. Despite the premise, the title and credits (Don'tDoDrugs.com) suggest it's meant as a cautionary game. It uses the rich library for styled menus when available, with a plain-text fallback.
 
