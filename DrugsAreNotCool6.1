@@ -1,0 +1,2249 @@
+# ============================================================================
+# DRUGS ARE NOT COOL - A Text-Based Drug Dealer Simulation Game
+# ============================================================================
+# By: Don'tDoDrugs.com
+# Developers: Wahbi Bakbak, Younes Alaska
+# ============================================================================
+
+import sys
+import random
+import time
+import os
+import hashlib
+import builtins
+import importlib
+
+try:
+    rich_module = importlib.import_module("rich")
+    rich_console_module = importlib.import_module("rich.console")
+    rich_panel_module = importlib.import_module("rich.panel")
+    rich_table_module = importlib.import_module("rich.table")
+
+    Console = rich_console_module.Console
+    Panel = rich_panel_module.Panel
+    Table = rich_table_module.Table
+    box = rich_module.box
+    console = Console()
+    HAS_RICH = True
+except ImportError:
+    console = None
+    HAS_RICH = False
+    Panel = None
+    Table = None
+    box = None
+
+
+# Compatibility wrapper for environments that lint the builtin print as undefined.
+def print(*args, **kwargs):
+    """Call the real builtin print function."""
+    return builtins.print(*args, **kwargs)
+
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+TERRITORIES = {
+    "Downtown": {"profit": (40, 80), "risk": 25},
+    "Suburbs": {"profit": (20, 40), "risk": 10},
+    "Industrial": {"profit": (30, 60), "risk": 18}
+}
+
+POSSIBLE_CUSTOMERS = [
+    "Tom.", "Jeff.", "Jose.", "El Chapo.",
+    "Mike.", "Ali.", "Viktor.", "Sam.",
+    "Carlos.", "Jamal."
+]
+
+# Drug configurations: unlock level, seed type, sell prices
+DRUG_CONFIG = {
+    "Weed": {
+        "unlock_level": 1,
+        "seed_name": "Weed Seeds",
+        "seed_price": (5, 12),
+        "sell_price": (30, 50),
+        "description": "Easy to grow, low risk, low profit",
+        "station": "Grow Room",
+        "has_recipe": False
+    },
+    "Meth": {
+        "unlock_level": 3,
+        "seed_name": "Meth Ingredients",
+        "seed_price": (15, 25),
+        "sell_price": (60, 90),
+        "description": "Medium risk, medium profit",
+        "station": "Lab",
+        "has_recipe": False
+    },
+    "Cocaine": {
+        "unlock_level": 5,
+        "seed_name": "Coca Seeds",
+        "seed_price": (30, 50),
+        "sell_price": (100, 150),
+        "description": "High risk, high profit",
+        "station": "Grow Room",
+        "has_recipe": True
+    }
+}
+
+# Track unlocked drugs
+unlocked_drugs = ["Weed"]
+
+
+# ============================================================================
+# GAME STATE
+# ============================================================================
+
+deliveries_done = 0
+money = 100
+drugs = {
+    "Weed": 0,
+    "Cocaine": 0,
+    "Meth": 0
+}
+# Seeds per drug type
+seeds = {
+    "Weed": 0,
+    "Meth": 0,
+    "Cocaine": 0
+}
+growing_solution = 0
+
+# Stations and recipes ownership
+stations = {
+    "Grow Room": True,  # Start with Grow Room unlocked for Weed
+    "Lab": False
+}
+recipes = {
+    "Weed": False,
+    "Meth": False,
+    "Cocaine": False
+}
+
+day = 1
+risk = 0
+reputation = 0
+in_jail = False
+jail_days = 0
+workers = 0
+level = 1
+xp = 0
+xp_needed = 100
+max_production = 5
+
+# Jail daily action flags
+jail_rep_used = False
+jail_train_used = False
+jail_lawyer_used = False
+
+# Customer system
+daily_customers = []
+customers_left_today = 0
+supplier_visited_today = False
+
+# Upgrades state
+upgrades = {
+    "Safe House": False,
+    "Police Bribe": False,
+    "Chemist": False
+}
+
+# Player organization name
+org_name = ""
+
+DIFFICULTY_SETTINGS = {
+    "easy": {"label": "Easy", "start_money": 150, "price_multiplier": 1.08, "risk_multiplier": 0.85},
+    "normal": {"label": "Normal", "start_money": 100, "price_multiplier": 1.0, "risk_multiplier": 1.0},
+    "hard": {"label": "Hard", "start_money": 80, "price_multiplier": 0.95, "risk_multiplier": 1.2},
+}
+
+difficulty = "normal"
+
+# Progression and economy tracking
+objective_state = {}
+total_earned = 0
+objective_lock = False
+achievements = {}
+activity_log = []
+
+
+# ============================================================================
+# PRINT FUNCTIONS
+# ============================================================================
+
+def slow_print(text, delay=0.05):
+    """Print text with a typewriter effect."""
+    for letter in text:
+        sys.stdout.write(letter)
+        sys.stdout.flush()
+        time.sleep(delay)
+    print()
+
+def very_slow_print(text, delay=0.07):
+    """Print text with a slower typewriter effect."""
+    for letter in text:
+        sys.stdout.write(letter)
+        sys.stdout.flush()
+        time.sleep(delay)
+    print()
+
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+def clear_screen():
+    """Clear the terminal so menus don't keep stacking on screen."""
+    if HAS_RICH and console is not None:
+        console.clear()
+        return
+
+    if os.name == "nt":
+        os.system("cls")
+    else:
+        os.system("clear")
+
+    print("\033[2J\033[H", end="", flush=True)
+
+
+def input_number(prompt, valid_values):
+    """Ask for a numeric input and reject invalid choices."""
+    while True:
+        value = input(prompt).strip()
+        if value.isdigit():
+            number = int(value)
+            if number in valid_values:
+                return number
+        if HAS_RICH and console is not None:
+            console.print("[bold red]Invalid choice.[/bold red] Please type one of the listed numbers.")
+        else:
+            print("Invalid choice. Please type one of the listed numbers.")
+
+
+def render_panel(title, rows):
+    """Render a clean terminal panel for the main menu and status screens."""
+    if HAS_RICH and console is not None:
+        table = Table(show_header=False, box=box.SIMPLE_HEAVY)
+        table.add_column("Label", style="bold cyan")
+        table.add_column("Value", style="bold white")
+        for label, value in rows:
+            table.add_row(str(label), str(value))
+        console.print(Panel.fit(table, title=title, border_style="cyan"))
+    else:
+        print(f"\n=== {title} ===")
+        for label, value in rows:
+            print(f"{label}: {value}")
+
+
+def render_menu(title, options):
+    """Render a clean menu list with numbered choices."""
+    if HAS_RICH and console is not None:
+        menu = Table(show_header=False, box=box.SIMPLE)
+        menu.add_column("Option", style="bold white")
+        for option in options:
+            menu.add_row(option)
+        console.print(Panel.fit(menu, title=title, border_style="green"))
+    else:
+        print(f"\n=== {title} ===")
+        for option in options:
+            print(option)
+
+
+def apply_cheat(code):
+    """Handle secret codes for fun gameplay boosts."""
+    global money, reputation, workers, risk, drugs, seeds, growing_solution, unlocked_drugs
+    global stations, recipes, level, xp, xp_needed, objective_state, total_earned
+
+    key = code.strip().lower()
+
+    cheat_actions = {
+        "greenlight": lambda: (
+            [unlocked_drugs.append(d) for d in DRUG_CONFIG.keys() if d not in unlocked_drugs],
+            [stations.__setitem__("Grow Room", True), stations.__setitem__("Lab", True)],
+            [recipes.__setitem__(d, True) for d in recipes.keys()],
+            slow_print("Cheat activated: Greenlight. Everything is unlocked."),
+            check_objectives()
+        ),
+        "bigboss": lambda: (
+            money.__class__(money + 1000),
+            slow_print("Cheat activated: Big Boss. +$1000, +25 rep, +3 workers."),
+            setattr(__import__('builtins'), 'money', money) if False else None,
+        ),
+        "levelup": lambda: add_xp(150),
+        "cashme": lambda: (globals().__setitem__('money', money + 500), slow_print("Cheat activated: Cash Me. +$500.")),
+        "freebase": lambda: (
+            [seeds.__setitem__(d, seeds.get(d, 0) + 20) for d in DRUG_CONFIG.keys()],
+            globals().__setitem__('growing_solution', growing_solution + 30),
+            slow_print("Cheat activated: Freebase. Supplies refilled.")
+        ),
+        "clean": lambda: (globals().__setitem__('risk', 0), slow_print("Cheat activated: Clean. Risk reset to 0.")),
+        "cheathelp": lambda: slow_print("Cheats: greenlight, bigboss, cashme, freebase, levelup, clean")
+    }
+
+    if key == "bigboss":
+        globals()['money'] = money + 1000
+        globals()['reputation'] = reputation + 25
+        globals()['workers'] = workers + 3
+        slow_print("Cheat activated: Big Boss. +$1000, +25 rep, +3 workers.")
+        check_objectives()
+        return True
+
+    if key == "greenlight":
+        for drug_name in DRUG_CONFIG:
+            if drug_name not in unlocked_drugs:
+                unlocked_drugs.append(drug_name)
+        stations["Grow Room"] = True
+        stations["Lab"] = True
+        for drug_name in recipes:
+            recipes[drug_name] = True
+        slow_print("Cheat activated: Greenlight. Everything is unlocked.")
+        check_objectives()
+        return True
+
+    if key == "cashme":
+        globals()['money'] = money + 500
+        slow_print("Cheat activated: Cash Me. +$500.")
+        check_objectives()
+        return True
+
+    if key == "freebase":
+        for drug_name in DRUG_CONFIG:
+            seeds[drug_name] = seeds.get(drug_name, 0) + 20
+        globals()['growing_solution'] = growing_solution + 30
+        slow_print("Cheat activated: Freebase. Supplies refilled.")
+        return True
+
+    if key == "levelup":
+        add_xp(150)
+        return True
+
+    if key == "clean":
+        globals()['risk'] = 0
+        slow_print("Cheat activated: Clean. Risk reset to 0.")
+        return True
+
+    if key == "cheathelp":
+        slow_print("Cheats: greenlight, bigboss, cashme, freebase, levelup, clean")
+        return True
+
+    return False
+
+
+REAL_INPUT = builtins.input
+
+
+def cheat_input(prompt=""):
+    """Intercept cheat commands entered from the terminal."""
+    try:
+        value = REAL_INPUT(prompt)
+    except (EOFError, KeyboardInterrupt):
+        return ""
+
+    if isinstance(value, str) and apply_cheat(value):
+        return cheat_input(prompt)
+    return value
+
+
+builtins.input = cheat_input
+
+
+def generate_hash(data):
+    """Generate SHA256 hash for save file integrity."""
+    return hashlib.sha256(data.encode()).hexdigest()
+
+
+def get_seed_price(drug_name):
+    """Return a random seed price from the configured range for a drug."""
+    config = DRUG_CONFIG[drug_name]
+    return random.randint(*config["seed_price"])
+
+
+def get_sale_price(drug_name, order_amount=1, multiplier=1.0):
+    """Return a sell price based on the configured market, order size, and difficulty."""
+    config = DRUG_CONFIG[drug_name]
+    base_price = random.randint(*config["sell_price"])
+    bulk_bonus = 1 + (max(order_amount - 1, 0) * 0.1)
+
+    # Slightly better sales as the player builds reputation.
+    reputation_bonus = 1 + (reputation * 0.02)
+
+    # Make drug tiers feel distinct: weed is stable, meth is a stronger mid-game, cocaine is premium.
+    drug_bonus = {
+        "Weed": 1.0,
+        "Meth": 1.15,
+        "Cocaine": 1.3,
+    }.get(drug_name, 1.0)
+
+    difficulty_bonus = DIFFICULTY_SETTINGS.get(difficulty, DIFFICULTY_SETTINGS["normal"])["price_multiplier"]
+
+    return int(base_price * bulk_bonus * multiplier * reputation_bonus * drug_bonus * difficulty_bonus)
+
+
+def add_activity(message):
+    """Record a short recent event for the player's status feed."""
+    activity_log.append(message)
+    if len(activity_log) > 5:
+        activity_log.pop(0)
+
+
+def get_activity_feed():
+    """Return the latest activity messages for the base HUD."""
+    if not activity_log:
+        return "No recent activity."
+    return " | ".join(activity_log[-3:])
+
+
+def get_base_hint():
+    """Return a short, state-aware hint for the player."""
+    if risk >= 70:
+        return "Tip: risk is high — consider sleeping or using a bribe."
+    if money < 80:
+        return "Tip: cash is low — sell in the city or buy cheaper seeds."
+    if not any(drugs.get(drug, 0) > 0 for drug in unlocked_drugs):
+        return "Tip: start by producing Weed and getting your first sale."
+    if not objective_state:
+        return "Tip: keep an eye on the objectives tab for your next milestone."
+
+    for objective in objective_state.values():
+        if not objective["done"]:
+            return f"Tip: next milestone: {objective['title']}"
+
+    return "Tip: save your game, then push your operation further."
+
+
+def initialize_objectives():
+    """Set up the game's progression objectives."""
+    return {
+        "cash_250": {
+            "title": "Earn $250 in sales",
+            "goal": 250,
+            "progress": 0,
+            "reward_money": 100,
+            "reward_xp": 50,
+            "done": False,
+        },
+        "rep_10": {
+            "title": "Reach 10 reputation",
+            "goal": 10,
+            "progress": 0,
+            "reward_money": 150,
+            "reward_xp": 60,
+            "done": False,
+        },
+        "unlock_meth": {
+            "title": "Unlock Meth",
+            "goal": 1,
+            "progress": 0,
+            "reward_money": 200,
+            "reward_xp": 75,
+            "done": False,
+        },
+        "weed_20": {
+            "title": "Produce 20 Weed",
+            "goal": 20,
+            "progress": 0,
+            "reward_money": 250,
+            "reward_xp": 100,
+            "done": False,
+        },
+    }
+
+
+def initialize_achievements():
+    """Set up achievement tracking for the current run."""
+    return {
+        "first_sale": {
+            "title": "First Sale",
+            "description": "Make your first successful deal.",
+            "done": False,
+        },
+        "level_two": {
+            "title": "Rising Up",
+            "description": "Reach level 2.",
+            "done": False,
+        },
+        "street_legend": {
+            "title": "Street Legend",
+            "description": "Reach 20 reputation.",
+            "done": False,
+        },
+        "money_maker": {
+            "title": "Money Maker",
+            "description": "Have $1,000 in cash.",
+            "done": False,
+        },
+        "unlock_meth": {
+            "title": "Meth Dealer",
+            "description": "Unlock Meth.",
+            "done": False,
+        },
+    }
+
+
+def show_objectives():
+    """Display the active progression objectives."""
+    print("\n=== OBJECTIVES ===")
+    for key, objective in objective_state.items():
+        current = objective["progress"]
+        goal = objective["goal"]
+        status = "DONE" if objective["done"] else f"{current}/{goal}"
+        print(f"- {objective['title']}: {status}")
+
+
+def check_achievements():
+    """Update and unlock story achievements based on current progress."""
+    global achievements
+
+    if not achievements:
+        achievements = initialize_achievements()
+
+    achievements["first_sale"]["done"] = total_earned > 0
+    achievements["level_two"]["done"] = level >= 2
+    achievements["street_legend"]["done"] = reputation >= 20
+    achievements["money_maker"]["done"] = money >= 1000
+    achievements["unlock_meth"]["done"] = "Meth" in unlocked_drugs
+
+
+def achievements_menu():
+    """Display the player's achievement progress."""
+    global achievements
+
+    while True:
+        clear_screen()
+        render_panel("ACHIEVEMENTS", [("Difficulty", DIFFICULTY_SETTINGS.get(difficulty, DIFFICULTY_SETTINGS["normal"])["label"])])
+        if not achievements:
+            achievements = initialize_achievements()
+        for key, achievement in achievements.items():
+            status = "DONE" if achievement["done"] else "LOCKED"
+            print(f"- {achievement['title']}: {status}")
+            if not achievement["done"]:
+                print(f"  {achievement['description']}")
+        print("\nPress Enter to return.")
+        input()
+        return
+
+
+def objectives_menu():
+    """Dedicated objectives menu with Enter to exit."""
+    global objective_state
+
+    while True:
+        clear_screen()
+        print("\n====== OBJECTIVES ======")
+        if not objective_state:
+            objective_state = initialize_objectives()
+        for objective in objective_state.values():
+            current = objective["progress"]
+            goal = objective["goal"]
+            status = "DONE" if objective["done"] else f"{current}/{goal}"
+            print(f"- {objective['title']}: {status}")
+        print("\nPress Enter to return.")
+        input()
+        return
+
+
+def check_objectives():
+    """Update and complete progression objectives."""
+    global money, total_earned, objective_state, objective_lock
+
+    if objective_lock:
+        return
+
+    if not objective_state:
+        objective_state = initialize_objectives()
+
+    objective_lock = True
+    try:
+        objective_state["cash_250"]["progress"] = total_earned
+        objective_state["rep_10"]["progress"] = reputation
+        objective_state["unlock_meth"]["progress"] = 1 if "Meth" in unlocked_drugs else 0
+        objective_state["weed_20"]["progress"] = drugs.get("Weed", 0)
+
+        for key, objective in objective_state.items():
+            if objective["done"]:
+                continue
+
+            if objective["progress"] >= objective["goal"]:
+                objective["done"] = True
+                money += objective["reward_money"]
+                add_xp(objective["reward_xp"])
+                slow_print(f"\nOBJECTIVE COMPLETE: {objective['title']}")
+                slow_print(f"Reward: ${objective['reward_money']} and {objective['reward_xp']} XP")
+    finally:
+        objective_lock = False
+
+
+def check_drug_unlocks():
+    """Check and unlock new drugs based on player level."""
+    global unlocked_drugs
+    
+    for drug_name, config in DRUG_CONFIG.items():
+        if drug_name not in unlocked_drugs and level >= config["unlock_level"]:
+            unlocked_drugs.append(drug_name)
+            slow_print(f"\n*** NEW DRUG UNLOCKED: {drug_name}! ***")
+            slow_print(f"Description: {config['description']}")
+            slow_print(f"You can now buy {config['seed_name']} from the supplier!")
+            add_activity(f"Unlocked: {drug_name}")
+            check_objectives()
+
+
+# ============================================================================
+# SAVE SYSTEM
+# ============================================================================
+
+def get_save_filename(name):
+    """Generate save filename from organization name."""
+    # Sanitize filename - remove invalid characters
+    safe_name = "".join(c for c in name if c.isalnum() or c in "-_").strip()
+    if not safe_name:
+        safe_name = "save"
+    return f"save_{safe_name}.txt"
+
+
+def list_saves():
+    """List all available save files."""
+    saves = []
+    if os.path.exists("saves"):
+        for filename in os.listdir("saves"):
+            if filename.startswith("save_") and filename.endswith(".txt"):
+                # Extract org name from filename
+                org = filename[5:-4]  # Remove "save_" and ".txt"
+                saves.append(org)
+    return sorted(saves)
+
+
+def save_game(save_name=None):
+    """Save game state to file with hash verification."""
+    global day, money, drugs, seeds, growing_solution
+    global risk, reputation, deliveries_done, max_production
+    global org_name, unlocked_drugs, workers, stations, recipes
+    global level, xp, xp_needed, in_jail, jail_days, total_earned, objective_state, achievements, difficulty
+
+    # Use provided name or global org_name
+    if save_name is None:
+        save_name = org_name
+
+    if not save_name:
+        slow_print("No organization name set!")
+        return False
+
+    filename = get_save_filename(save_name)
+
+    # Create saves directory if it doesn't exist
+    if not os.path.exists("saves"):
+        os.makedirs("saves")
+
+    data = f"{save_name}\n"  # First line is the organization name
+    data += f"{day}\n{money}\n"
+    # Save drugs as dictionary - store each drug type
+    for drug_name in ["Weed", "Cocaine", "Meth"]:
+        data += f"{drugs.get(drug_name, 0)}\n"
+    # Save seeds per drug type
+    for drug_name in ["Weed", "Meth", "Cocaine"]:
+        data += f"{seeds.get(drug_name, 0)}\n"
+    data += f"{growing_solution}\n"
+    data += f"{risk}\n{reputation}\n{deliveries_done}\n"
+    data += f"{max_production}\n{workers}\n{total_earned}\n"
+    # Save level, xp, xp_needed, in_jail, jail_days
+    data += f"{level}\n{xp}\n{xp_needed}\n{in_jail}\n{jail_days}\n"
+
+    # Save stations
+    for key in stations:
+        data += f"{stations[key]}\n"
+    
+    # Save recipes
+    for key in recipes:
+        data += f"{recipes[key]}\n"
+    
+    # Save upgrades
+    for key in upgrades:
+        data += f"{upgrades[key]}\n"
+    
+    # Save unlocked drugs
+    data += ",".join(unlocked_drugs) + "\n"
+    data += f"{difficulty}\n"
+    data += str(len(objective_state)) + "\n"
+    for key, objective in objective_state.items():
+        data += f"{key}|{objective['progress']}|{objective['done']}\n"
+
+    if not achievements:
+        achievements = initialize_achievements()
+
+    data += str(len(achievements)) + "\n"
+    for key, achievement in achievements.items():
+        data += f"{key}|{achievement['done']}\n"
+
+    hash_value = generate_hash(data)
+
+    filepath = os.path.join("saves", filename)
+    with open(filepath, "w") as f:
+        f.write(data)
+        f.write(hash_value)
+
+    add_activity(f"Saved: {save_name}")
+    slow_print(f"Game saved as '{save_name}'.")
+    return True
+
+
+def load_game(save_name):
+    """Load game state from file with integrity check."""
+    global day, money, drugs, seeds, growing_solution
+    global risk, reputation, deliveries_done, max_production
+    global upgrades, org_name, unlocked_drugs, workers, stations, recipes
+    global level, xp, xp_needed, in_jail, jail_days, total_earned, objective_state, achievements, difficulty, activity_log
+
+    filename = get_save_filename(save_name)
+    filepath = os.path.join("saves", filename)
+
+    if not os.path.exists(filepath):
+        return False
+
+    with open(filepath, "r") as f:
+        lines = f.readlines()
+
+    saved_hash = lines[-1].strip()
+    data = "".join(lines[:-1])
+
+    values = data.splitlines()
+    if len(values) < 29:
+        slow_print("Save file is incomplete!")
+        return False
+
+    if generate_hash(data) != saved_hash:
+        slow_print("Save file corrupted or tampered with!")
+        return False
+
+    # Load values (first line is org name)
+    org_name = values[0]
+    day = int(values[1])
+    money = int(values[2])
+    # Load drugs as dictionary - each drug type on separate line
+    drugs = {
+        "Weed": int(values[3]),
+        "Cocaine": int(values[4]),
+        "Meth": int(values[5])
+    }
+    # Load seeds per drug type
+    seeds = {
+        "Weed": int(values[6]),
+        "Meth": int(values[7]),
+        "Cocaine": int(values[8])
+    }
+    growing_solution = int(values[9])
+    risk = int(values[10])
+    reputation = int(values[11])
+    deliveries_done = int(values[12])
+    max_production = int(values[13])
+    workers = int(values[14])
+    total_earned = int(values[15])
+    
+    # Load level, xp, xp_needed, in_jail, jail_days
+    level = int(values[16])
+    xp = int(values[17])
+    xp_needed = int(values[18])
+    in_jail = values[19] == "True"
+    jail_days = int(values[20])
+
+    # Load stations
+    stations["Grow Room"] = values[21] == "True"
+    stations["Lab"] = values[22] == "True"
+    
+    # Load recipes
+    recipes["Weed"] = values[23] == "True"
+    recipes["Meth"] = values[24] == "True"
+    recipes["Cocaine"] = values[25] == "True"
+
+    upgrades["Safe House"] = values[26] == "True"
+    upgrades["Police Bribe"] = values[27] == "True"
+    upgrades["Chemist"] = values[28] == "True"
+    
+    # Load unlocked drugs
+    unlocked_drugs = values[29].split(",") if values[29] else ["Weed"]
+
+    if len(values) > 30 and values[30] in DIFFICULTY_SETTINGS:
+        difficulty = values[30]
+        objective_count = int(values[31]) if len(values) > 31 and values[31].isdigit() else 0
+        objective_start = 32
+    else:
+        difficulty = "normal"
+        objective_count = int(values[30]) if len(values) > 30 and values[30].isdigit() else 0
+        objective_start = 31
+
+    objective_state = initialize_objectives()
+
+    for i in range(objective_count):
+        entry = values[objective_start + i]
+        if "|" not in entry:
+            continue
+        key, progress, done = entry.split("|")
+        if key in objective_state:
+            objective_state[key]["progress"] = int(progress)
+            objective_state[key]["done"] = (done == "True")
+
+    achievements = initialize_achievements()
+    achievement_start = objective_start + objective_count
+    if len(values) > achievement_start and values[achievement_start].isdigit():
+        achievement_count = int(values[achievement_start])
+        for i in range(achievement_count):
+            entry = values[achievement_start + 1 + i]
+            if "|" not in entry:
+                continue
+            key, done = entry.split("|")
+            if key in achievements:
+                achievements[key]["done"] = (done == "True")
+
+    check_objectives()
+    check_achievements()
+    activity_log = []
+    add_activity(f"Loaded: {org_name}")
+    add_activity("Base restored")
+    slow_print(f"Save loaded: {org_name}")
+    return True
+
+
+# ============================================================================
+# CORE GAME SYSTEMS
+# ============================================================================
+
+def quit_game():
+    """Exit the game with save option."""
+    choice = input("Are you sure you want to quit? (y/n): ")
+    if choice and choice.lower() == "y":
+        save_game()
+        slow_print("Exiting game...")
+        sys.exit()
+
+
+def check_for_arrest():
+    """Check if risk is too high and trigger arrest."""
+    global risk, in_jail, jail_days, money, drugs
+
+    if risk >= 100 and not in_jail:
+        slow_print("Police raided your base!")
+        slow_print("You got arrested!")
+
+        in_jail = True
+        jail_days = random.randint(2, 5)
+
+        # Optional punishment
+        lost_money = int(money * 0.3)
+        money -= lost_money
+
+        lost_drugs = min(sum(drugs.values()), 3)
+        # Remove from random drug types
+        for _ in range(lost_drugs):
+            available = [d for d, c in drugs.items() if c > 0]
+            if available:
+                drug_to_remove = random.choice(available)
+                drugs[drug_to_remove] -= 1
+
+        slow_print(f"You lost ${lost_money} and {lost_drugs} drugs.")
+        risk = 0
+
+
+def generate_customers():
+    """Generate random customers for the day."""
+    global daily_customers, customers_left_today
+
+    amount = random.randint(3, 5)
+    daily_customers = random.sample(POSSIBLE_CUSTOMERS, amount)
+    customers_left_today = len(daily_customers)
+
+
+def get_next_customer():
+    """Get the next customer from the queue."""
+    global customers_left_today
+    if customers_left_today > 0:
+        customers_left_today -= 1
+        return daily_customers[customers_left_today]
+    return None
+
+
+# ============================================================================
+# LEVEL SYSTEM
+# ============================================================================
+
+def add_xp(amount):
+    """Add XP and check for level up."""
+    global xp, level, xp_needed
+
+    xp += amount
+    slow_print(f"You gained {amount} XP!")
+    check_objectives()
+
+    while xp >= xp_needed:
+        xp -= xp_needed
+        level += 1
+        xp_needed += 50
+
+        slow_print("LEVEL UP!")
+        slow_print(f"You are now Level {level}!")
+
+        level_up_bonus()
+
+
+def level_up_bonus():
+    """Apply bonus when leveling up."""
+    global reputation
+
+    reputation += 5
+    slow_print("Your reputation increased by 5!")
+    
+    # Check for new drug unlocks
+    check_drug_unlocks()
+
+
+# ============================================================================
+# MAIN MENU
+# ============================================================================
+
+def main_menu():
+    """Display the polished main menu with numbered choices."""
+    while True:
+        clear_screen()
+        options = [
+            "1. Start Game",
+            "2. Load Game",
+            "3. How to Play",
+            "4. Credits",
+            "5. Exit",
+        ]
+        render_panel("DRUGS ARE NOT COOL", [("Status", "Operation Online")])
+        render_menu("MAIN MENU", options)
+
+        choice = input_number("Choose: ", [1, 2, 3, 4, 5, 911])
+
+        if choice == 1:
+            difficulty_menu()
+        elif choice == 2:
+            load_game_menu()
+        elif choice == 3:
+            how_to_play()
+        elif choice == 4:
+            credits()
+        elif choice == 5:
+            quit_game()
+        elif choice == 911:
+            start_game()  # Secret code to start game immediately
+
+
+def load_game_menu():
+    """Display load game menu with list of saves."""
+    clear_screen()
+    saves = list_saves()
+
+    if not saves:
+        slow_print("No save files found.")
+        return
+
+    print("\n====== LOAD GAME ======")
+    for i, save_name in enumerate(saves, 1):
+        print(f"{i}. {save_name}")
+    print("D. Delete Save")
+    print("0. Back")
+
+    choice = input("Choose: ")
+
+    if choice == "0":
+        return
+    
+    if choice.lower() == "d":
+        delete_save_menu(saves)
+        return
+
+    try:
+        idx = int(choice) - 1
+        if 0 <= idx < len(saves):
+            if load_game(saves[idx]):
+                generate_customers()
+                base_menu()
+            else:
+                slow_print("Failed to load save.")
+        else:
+            slow_print("Invalid choice.")
+    except ValueError:
+        slow_print("Please enter a valid number.")
+
+
+def delete_save_menu(saves):
+    """Delete a save file."""
+    clear_screen()
+    print("\n====== DELETE SAVE ======")
+    for i, save_name in enumerate(saves, 1):
+        print(f"{i}. {save_name}")
+    print("0. Back")
+    
+    choice = input("Enter number to delete: ")
+    
+    if choice == "0":
+        return
+    
+    try:
+        idx = int(choice) - 1
+        if 0 <= idx < len(saves):
+            save_name = saves[idx]
+            confirm = input(f"Delete '{save_name}'? (y/n): ")
+            if confirm.lower() == "y":
+                filename = get_save_filename(save_name)
+                filepath = os.path.join("saves", filename)
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                    slow_print(f"Save '{save_name}' deleted!")
+                else:
+                    slow_print("Save file not found.")
+            else:
+                slow_print("Cancelled.")
+        else:
+            slow_print("Invalid choice.")
+    except ValueError:
+        slow_print("Please enter a valid number.")
+
+
+# ============================================================================
+# START GAME
+# ============================================================================
+
+def difficulty_menu():
+    """Choose a difficulty before starting the game."""
+    global difficulty
+
+    while True:
+        clear_screen()
+        render_panel("DIFFICULTY", [("Mode", DIFFICULTY_SETTINGS.get(difficulty, DIFFICULTY_SETTINGS["normal"])["label"])])
+        render_menu("SELECT DIFFICULTY", [
+            "1. Easy",
+            "2. Normal",
+            "3. Hard",
+            "4. Back",
+        ])
+
+        choice = input_number("Choose: ", [1, 2, 3, 4])
+
+        if choice == 1:
+            difficulty = "easy"
+            start_game()
+            return
+        elif choice == 2:
+            difficulty = "normal"
+            start_game()
+            return
+        elif choice == 3:
+            difficulty = "hard"
+            start_game()
+            return
+        elif choice == 4:
+            return
+
+
+def start_game():
+    """Initialize a new game."""
+    global org_name, day, money, drugs, seeds, growing_solution
+    global risk, reputation, deliveries_done, max_production, workers
+    global level, xp, xp_needed
+    global in_jail, jail_days, unlocked_drugs, stations, recipes, total_earned, objective_state, achievements
+    global difficulty, activity_log, supplier_visited_today
+
+    # Reset all game state
+    day = 1
+    money = DIFFICULTY_SETTINGS.get(difficulty, DIFFICULTY_SETTINGS["normal"])["start_money"]
+    drugs = {
+        "Weed": 0,
+        "Cocaine": 0,
+        "Meth": 0
+    }
+    seeds = {
+        "Weed": 0,
+        "Meth": 0,
+        "Cocaine": 0
+    }
+    growing_solution = 0
+    risk = 0
+    reputation = 0
+    deliveries_done = 0
+    max_production = 5
+    workers = 0
+    level = 1
+    xp = 0
+    xp_needed = 100
+    in_jail = False
+    jail_days = 0
+    total_earned = 0
+    objective_state = initialize_objectives()
+    achievements = initialize_achievements()
+    activity_log = []
+    supplier_visited_today = False
+    unlocked_drugs = ["Weed"]  # Start with only Weed unlocked
+    stations = {
+        "Grow Room": True,  # Start with Grow Room unlocked for Weed
+        "Lab": False
+    }
+    recipes = {
+        "Weed": False,
+        "Meth": False,
+        "Cocaine": False
+    }
+    upgrades["Safe House"] = False
+    upgrades["Police Bribe"] = False
+    upgrades["Chemist"] = False
+
+    generate_customers()
+
+    slow_print("\nStarting the game...")
+    org_name = input("Enter your organization name: ")
+
+    slow_print("You are a low life criminal starting a new drug business.")
+    slow_print("You find yourself in a city with no money, health problems, and illegal immigrants.")
+    slow_print("After 3 rough days with no food you meet Uncle Bob who is a former drug dealer.")
+    add_activity("New operation launched")
+    slow_print("Uncle bob leads you to his old garage and told you to use it as a base.")
+    slow_print("You reach Uncle Bob's garage which to your suprise is pretty clean.")
+    slow_print("\n*** TIP: Level up to unlock more drugs! Weed is available now. ***")
+    slow_print(f"   - Meth unlocks at Level 3")
+    slow_print(f"   - Cocaine unlocks at Level 5")
+
+    # Auto-save new game
+    save_game(org_name)
+
+    base_menu()
+
+
+# ============================================================================
+# BASE MENU
+# ============================================================================
+
+def base_menu():
+    """Main base/hub menu with a cleaner terminal layout and numeric inputs."""
+    global day, objective_state
+
+    while True:
+        clear_screen()
+        if in_jail:
+            jail_menu()
+            continue
+
+        total_drugs = sum(drugs.values())
+        check_objectives()
+        check_achievements()
+
+        stats = [
+            ("Day", day),
+            ("Level", level),
+            ("XP", f"{xp}/{xp_needed}"),
+            ("Money", f"${money}"),
+            ("Risk", f"{risk}%"),
+            ("Rep", reputation),
+            ("Drugs", f"{sum(drugs.values())}"),
+            ("Growing Solution", growing_solution),
+        ]
+
+        render_panel("BASE", stats)
+        drug_display = " | ".join(f"{d}: {c}" for d, c in drugs.items())
+        seed_display = " | ".join(f"{d}: {c}" for d, c in seeds.items())
+
+        if not objective_state:
+            objective_state = initialize_objectives()
+
+        objective_count = len(objective_state)
+        completed_objectives = sum(1 for objective in objective_state.values() if objective["done"])
+
+        next_unlock = "All drugs unlocked"
+        for drug_name, config in DRUG_CONFIG.items():
+            if drug_name not in unlocked_drugs:
+                next_unlock = f"{drug_name} at level {config['unlock_level']}"
+                break
+
+        if HAS_RICH and console is not None:
+            console.print(f"[bold]Drugs:[/bold] {drug_display}")
+            console.print(f"[bold]Seeds:[/bold] {seed_display}")
+        else:
+            print(f"Drugs: {drug_display}")
+            print(f"Seeds: {seed_display}")
+
+        options = [
+            "1. Hop on the computer.",
+            "2. Go to the city.",
+            "3. Drug Station.",
+            "4. Sleep.",
+            "5. Save Game",
+            "6. Objectives",
+            "7. Achievements",
+            "0. Quit Game",
+        ]
+        render_menu("ACTIONS", options)
+
+        choice = input_number("Choose: ", [0, 1, 2, 3, 4, 5, 6, 7])
+
+        if choice == 1:
+            desktop()
+        elif choice == 2:
+            city()
+        elif choice == 3:
+            drug_station()
+        elif choice == 4:
+            sleep()
+        elif choice == 5:
+            save_game()
+        elif choice == 6:
+            objectives_menu()
+        elif choice == 7:
+            achievements_menu()
+        elif choice == 0:
+            quit_game()
+
+
+# ============================================================================
+# JAIL SYSTEM
+# ============================================================================
+
+def jail_menu():
+    """Jail menu with limited options and numeric input."""
+    clear_screen()
+    options = []
+    valid = []
+
+    if not jail_train_used:
+        options.append("1. Train")
+        valid.append(1)
+    if not jail_rep_used:
+        options.append("2. Build Reputation")
+        valid.append(2)
+    if not jail_lawyer_used:
+        options.append("3. Call Lawyer ($100)")
+        valid.append(3)
+    options.extend(["4. Sleep", "0. Quit Game"])
+    valid.extend([4, 0])
+
+    render_panel("JAIL", [("Days Remaining", jail_days), ("Risk", f"{risk}%")])
+    render_menu("PRISON MENU", options)
+
+    choice = input_number("Choose: ", valid)
+
+    if choice == 1:
+        jail_train()
+    elif choice == 2:
+        jail_reputation()
+    elif choice == 3:
+        jail_lawyer()
+    elif choice == 4:
+        sleep()
+    elif choice == 0:
+        quit_game()
+
+
+def jail_train():
+    """Train in prison to reduce risk."""
+    global risk, jail_train_used
+
+    if jail_train_used:
+        slow_print("You already trained today.")
+        return
+
+    slow_print("You train in the prison yard.")
+    reduction = random.randint(5, 15)
+    risk = max(0, risk - reduction)
+    jail_train_used = True
+
+    slow_print(f"Future risk reduced by {reduction}%.")
+
+
+def jail_reputation():
+    """Build reputation while in jail."""
+    global reputation, jail_rep_used
+
+    if jail_rep_used:
+        slow_print("You already built reputation today.")
+        return
+
+    gain = random.randint(1, 5)
+    reputation += gain
+    jail_rep_used = True
+    slow_print(f"You gained {gain} reputation in prison.")
+
+
+def jail_lawyer():
+    """Hire lawyer to reduce jail sentence."""
+    global money, jail_days, jail_lawyer_used
+
+    if jail_lawyer_used:
+        slow_print("You already called your lawyer today.")
+        return
+
+    if money >= 100:
+        money -= 100
+        reduction = random.randint(1, 2)
+        jail_days = max(0, jail_days - reduction)
+        jail_lawyer_used = True
+
+        slow_print(f"Lawyer reduced sentence by {reduction} days.")
+    else:
+        slow_print("Not enough money.")
+
+
+# ============================================================================
+# WORKER SYSTEM
+# ============================================================================
+
+def city_hire_worker():
+    """Hire a worker from the city."""
+    global money, workers
+
+    cost = 200
+
+    print("\n====== HIRE WORKER ======")
+    slow_print(f"Current Workers: {workers}")
+    slow_print(f"Hiring Cost: ${cost}")
+    print("1. Hire")
+    print("2. Cancel")
+
+    choice = input("Choose: ")
+
+    if choice == "1":
+        if money >= cost:
+            money -= cost
+            workers += 1
+            slow_print("You hired a worker from the city.")
+        else:
+            slow_print("Not enough money.")
+
+
+def worker_production():
+    """Workers produce random unlocked drugs each day."""
+    global drugs, workers, seeds, growing_solution, unlocked_drugs
+
+    if workers <= 0:
+        return
+
+    production_log = {}
+
+    # Use a list-based loop to avoid range-related tooling issues in some editors.
+    for _ in [None] * max(0, workers):
+        # Pick a random unlocked drug that can be produced
+        valid_drugs = []
+        for drug_type in unlocked_drugs:
+            config = DRUG_CONFIG[drug_type]
+            station_needed = config.get("station", "Grow Room")
+            
+            # Check station ownership
+            if not stations.get(station_needed, False):
+                continue
+            # Check recipe ownership
+            if config.get("has_recipe", False) and not recipes.get(drug_type, False):
+                continue
+            # Check if we have materials
+            if seeds.get(drug_type, 0) <= 0 or growing_solution <= 0:
+                continue
+            
+            valid_drugs.append(drug_type)
+        
+        if not valid_drugs:
+            break
+        
+        drug_type = random.choice(valid_drugs)
+        
+        # Consume materials
+        seeds[drug_type] -= 1
+        growing_solution -= 1
+
+        # Add 1 of that drug (doubled if Chemist)
+        produced = 2 if upgrades["Chemist"] else 1
+        drugs[drug_type] += produced
+
+        # Track production for display
+        if drug_type in production_log:
+            production_log[drug_type] += produced
+        else:
+            production_log[drug_type] = produced
+
+    # Print what was produced
+    if production_log:
+        result = ", ".join(f"{k}: {v}" for k, v in production_log.items())
+        slow_print(f"Workers produced -> {result}")
+    else:
+        slow_print("Workers couldn't produce any drugs (missing materials or stations).")
+
+
+# ============================================================================
+# SLEEP SYSTEM
+# ============================================================================
+
+def sleep():
+    """Advance to the next day."""
+    global day, risk, in_jail, jail_days, supplier_visited_today
+    global jail_rep_used, jail_train_used, jail_lawyer_used
+
+    slow_print("You go to sleep...")
+    day += 1
+    supplier_visited_today = False
+
+    # Reset jail daily actions
+    jail_rep_used = False
+    jail_train_used = False
+    jail_lawyer_used = False
+
+    if in_jail:
+        jail_days -= 1
+        slow_print(f"You are in jail. {jail_days} days remaining.")
+
+        if jail_days <= 0:
+            in_jail = False
+            slow_print("You were released from jail.")
+    else:
+        risk = max(0, risk - 20)
+        worker_production()
+        check_for_arrest()
+
+    generate_customers()
+    save_game()
+    slow_print("A new day begins.")
+
+
+# ============================================================================
+# DRUG STATION
+# ============================================================================
+
+def drug_station():
+    """Produce drugs from seeds and growing solution."""
+    global drugs, seeds, growing_solution, max_production
+
+    print("\n====== DRUG STATION ======")
+    # Show seeds per drug type
+    print("Seeds:")
+    for drug_name, count in seeds.items():
+        print(f"  {drug_name}: {count}")
+    slow_print(f"Growing Solution: {growing_solution}")
+    slow_print(f"Max Production Per Visit: {max_production}")
+    print("1. Make Drugs")
+    print("2. Return")
+    print("0. Quit Game")
+
+    choice = input("Choose: ")
+
+    if choice == "1":
+        # Show available drug types based on unlocked drugs AND station ownership
+        print("\nAvailable drug types:")
+        available_drugs = []
+        for i, d in enumerate(unlocked_drugs):
+            config = DRUG_CONFIG[d]
+            station_needed = config.get("station", "Grow Room")
+            has_recipe = config.get("has_recipe", False)
+            
+            # Check station ownership
+            if not stations.get(station_needed, False):
+                continue
+            # Check recipe ownership
+            if has_recipe and not recipes.get(d, False):
+                continue
+            
+            available_drugs.append(d)
+            print(f"{len(available_drugs)}. {d}")
+        
+        if not available_drugs:
+            slow_print("You don't have the required station or recipe!")
+            return
+        
+        try:
+            choice = int(input("Choose drug type: "))
+            if choice < 1 or choice > len(available_drugs):
+                slow_print("Invalid choice.")
+                return
+            drugtype = available_drugs[choice - 1]
+        except ValueError:
+            slow_print("Please enter a valid number.")
+            return
+        
+        try:
+            amount = int(input("How many drugs do you want to make? "))
+        except ValueError:
+            slow_print("Please enter a valid number")
+            return
+
+        if amount > max_production:
+            slow_print(f"You can only produce up to {max_production} at once.")
+            return
+
+        # Check seeds for the specific drug type
+        if seeds.get(drugtype, 0) >= amount and growing_solution >= amount:
+            # Deduct materials
+            seeds[drugtype] -= amount
+            growing_solution -= amount
+
+            produced = amount * (2 if upgrades["Chemist"] else 1)
+            drugs[drugtype] += produced
+            slow_print(f"You produced {produced} {drugtype}.")
+        else:
+            slow_print("Not enough materials.")
+
+    elif choice == "0":
+        quit_game()
+
+
+# ============================================================================
+# DESKTOP / COMPUTER
+# ============================================================================
+
+def desktop():
+    """Computer desktop with email and store in a cleaner terminal UI."""
+    while True:
+        clear_screen()
+        render_panel("DESKTOP", [("Money", f"${money}"), ("Inbox", len(daily_customers))])
+        render_menu("SYSTEM", [
+            "1. Emails",
+            "2. Drugzon (Store)",
+            "3. Shutdown",
+            "0. Quit Game",
+        ])
+
+        choice = input_number("Choose: ", [0, 1, 2, 3])
+
+        if choice == 1:
+            emails()
+        elif choice == 2:
+            store()
+        elif choice == 3:
+            break
+        elif choice == 0:
+            quit_game()
+
+
+# ============================================================================
+# STORE (DRUGZON)
+# ============================================================================
+
+def store():
+    """Online store to buy seeds and growing solution with a cleaner interface."""
+    global money, seeds, growing_solution
+
+    while True:
+        clear_screen()
+        render_panel("DRUGZON", [("Money", f"${money}"), ("Growing Solution", growing_solution)])
+
+        store_seed_options = []
+        options = []
+        for drug_name in DRUG_CONFIG.keys():
+            config = DRUG_CONFIG[drug_name]
+            if level >= config["unlock_level"]:
+                station_needed = config.get("station", "Grow Room")
+                if not stations.get(station_needed, False):
+                    continue
+                if config.get("has_recipe", False) and not recipes.get(drug_name, False):
+                    continue
+                seed_price = get_seed_price(drug_name)
+                store_seed_options.append((drug_name, config["seed_name"], seed_price))
+                options.append(f"{len(options) + 1}. {config['seed_name']} (${seed_price} each)")
+
+        options.append(f"{len(options) + 1}. Buy Growing Solution ($15 each)")
+        options.append(f"3. Exit")
+        options.append("0. Quit Game")
+
+        render_menu("AVAILABLE SEEDS", options)
+        valid = list(range(0, len(options) + 1))
+        valid = [v for v in valid if v != len(options)]
+        choice = input_number("Choose: ", list(range(0, len(options))))
+
+        if choice == 0:
+            quit_game()
+        elif choice == len(options) - 1:
+            return
+        elif choice == len(options) - 2:
+            try:
+                amount = int(input("How many growing solutions do you want to buy? "))
+                total_cost = amount * 15
+            except ValueError:
+                slow_print("Please enter a valid number.")
+                continue
+
+            if money >= total_cost:
+                money -= total_cost
+                growing_solution += amount
+                slow_print(f"You bought {amount} growing solutions.")
+            else:
+                slow_print("Not enough money.")
+        elif 1 <= choice <= len(store_seed_options):
+            drug_name, seed_name, seed_price = store_seed_options[choice - 1]
+            try:
+                amount = int(input(f"How many {seed_name} do you want to buy? "))
+                total_cost = amount * seed_price
+            except ValueError:
+                slow_print("Please enter a valid number")
+                continue
+
+            if money >= total_cost:
+                money -= total_cost
+                seeds[drug_name] = seeds.get(drug_name, 0) + amount
+                slow_print(f"You bought {amount} {seed_name} for ${total_cost}.")
+            else:
+                slow_print("Not enough money.")
+        else:
+            slow_print("Invalid Input")
+
+
+
+# ============================================================================
+# NEGOTIATION SYSTEM
+# (Paste this block ABOVE the "# EMAIL SYSTEM" section of your game file.)
+# ============================================================================
+
+# Each buyer has a personality: how many times they'll put up with haggling
+# (patience) and how far above their first offer they'd secretly be willing to go.
+NEGOTIATION_PERSONALITIES = {
+    "Stingy":    {"patience": 2, "ceiling": (1.05, 1.15), "mood": "grumbles"},
+    "Fair":      {"patience": 3, "ceiling": (1.10, 1.30), "mood": "shrugs"},
+    "Desperate": {"patience": 4, "ceiling": (1.25, 1.60), "mood": "sweats"},
+}
+
+
+def negotiate_price(customer, drug_name, amount, offer):
+    """Haggle with a buyer.
+
+    Returns the agreed price PER UNIT, or None if the buyer walks away
+    (or you walk away). Reputation and level improve your odds.
+    """
+    # Skill bonuses: up to +20% from reputation, up to +10% from level
+    skill = min(reputation, 50) * 0.004 + min(level, 10) * 0.01
+
+    personality_name = random.choice(list(NEGOTIATION_PERSONALITIES.keys()))
+    personality = NEGOTIATION_PERSONALITIES[personality_name]
+    patience = personality["patience"]
+
+    # Hidden maximum the buyer would ever pay per unit
+    ceiling = int(offer * random.uniform(*personality["ceiling"]))
+    ceiling = max(ceiling, offer)
+
+    current = offer
+    rounds = 0
+
+    slow_print(f"\n--- NEGOTIATION with {customer} ---")
+    slow_print(f"They want {amount} {drug_name}. They seem {personality_name.lower()}.")
+
+    while True:
+        print(f"\nCurrent offer: ${current} each (${current * amount} total)")
+        print(f"Their patience: {'*' * patience}{'.' * (personality['patience'] - patience)}")
+        print("1. Accept this price")
+        print("2. Ask for a bit more (+10%)")
+        print("3. Push hard (+25%)")
+        print("4. Bluff: 'I have other buyers' (risky, big payoff)")
+        print("5. Walk away")
+
+        choice = input_number("Choose: ", [1, 2, 3, 4, 5])
+
+        if choice == 1:
+            if current > offer:
+                gain = (current - offer) * amount
+                slow_print(f"Deal! You squeezed an extra ${gain} out of {customer}.")
+                add_xp(10 * rounds)
+            else:
+                slow_print("Deal. No haggling, no hassle.")
+            return current
+
+        if choice == 5:
+            slow_print("You walk away from the deal.")
+            return None
+
+        rounds += 1
+
+        if choice == 2:
+            target = int(current * 1.10)
+            base_chance = 0.75
+            patience_cost = 1
+        elif choice == 3:
+            target = int(current * 1.25)
+            base_chance = 0.55
+            patience_cost = 1
+        else:
+            # Bluff: aim for their absolute ceiling
+            target = ceiling
+            base_chance = 0.35
+            patience_cost = 2
+
+        # Make sure a "raise" is always at least $1 more
+        target = max(target, current + 1)
+
+        if target <= ceiling:
+            chance = base_chance + skill
+        else:
+            # Asking beyond what they'd ever pay almost never works
+            chance = 0.05 + skill * 0.25
+        chance = min(max(chance, 0.05), 0.95)
+
+        if random.random() < chance:
+            current = min(target, ceiling) if choice == 4 else target
+            slow_print(f"{customer} {personality['mood']} and agrees to ${current} each.")
+            if current >= ceiling:
+                slow_print(f"{customer}: 'That's my limit. Take it or leave it.'")
+        else:
+            patience -= patience_cost
+            if choice == 4:
+                slow_print(f"{customer} sees through your bluff and gets angry!")
+            else:
+                slow_print(f"{customer} refuses to pay more.")
+
+            if patience <= 0:
+                slow_print(f"{customer} loses patience and storms off. Deal's off!")
+                return None
+
+
+# ============================================================================
+# EMAIL SYSTEM
+# ============================================================================
+
+def emails():
+    """Process customer emails and make sales."""
+    global deliveries_done, drugs, money, reputation, total_earned
+
+    while True:
+        customer = get_next_customer()
+
+        if customer is None:
+            slow_print("No more customers today.")
+            return
+
+        # Customer randomly requests multiple drugs based on level (capped at 10)
+        max_order = min(level, 10)
+        order_amount = random.randint(1, max_order)
+        
+        available_drugs = [d for d in unlocked_drugs if drugs.get(d, 0) > 0]
+        if not available_drugs:
+            slow_print("You have no drugs to sell!")
+            return
+        
+        requested_drug = random.choice(available_drugs)
+        sell_price = get_sale_price(requested_drug, order_amount)
+
+        slow_print("\n====New Email====")
+        slow_print(f"From: {customer}")
+        slow_print(f"Subject: Need {requested_drug}")
+        slow_print(f"Message: I need {order_amount} {requested_drug}. Will pay ${sell_price} each.")
+
+        print("1. Send")
+        print("2. Next Email")
+        print("3. Negotiate Price")
+        print("4. Exit")
+
+        choice = input("Choose: ")
+
+        if choice == "1":
+            if drugs[requested_drug] >= order_amount:
+                drugs[requested_drug] -= order_amount
+                revenue = sell_price * order_amount
+                total_earned += revenue
+                money += revenue
+                add_xp(20 * order_amount)
+                deliveries_done += 1
+                reputation += 2 * order_amount
+                check_objectives()
+                slow_print(f"Sold {order_amount} {requested_drug} for ${revenue}")
+            else:
+                slow_print(f"You don't have enough {requested_drug}! (Need {order_amount}, have {drugs[requested_drug]})")
+        elif choice == "2":
+            continue  # Skip to next customer
+        elif choice == "3":
+            # Implement price negotiation logic here
+            negotiate_price(customer, requested_drug, order_amount, sell_price)
+        elif choice == "4":
+            return
+        else:
+            slow_print("Invalid choice.")
+
+
+# ============================================================================
+# CITY
+# ============================================================================
+
+def city():
+    """City hub with various locations and a polished menu layout."""
+    while True:
+        clear_screen()
+        if in_jail:
+            return
+
+        render_panel("CITY", [("Money", f"${money}"), ("Risk", f"{risk}%"), ("Rep", reputation)])
+        render_menu("CITY OPTIONS", [
+            "1. Street Deal",
+            "2. Visit Supplier",
+            "3. Black Market",
+            "4. Upgrade Base",
+            "5. Hire Worker",
+            "6. Return",
+            "0. Quit Game",
+        ])
+
+        choice = input_number("Choose: ", [0, 1, 2, 3, 4, 5, 6])
+
+        if choice == 1:
+            street_deal()
+        elif choice == 2:
+            supplier()
+        elif choice == 3:
+            black_market()
+        elif choice == 4:
+            upgrade_menu()
+        elif choice == 5:
+            city_hire_worker()
+        elif choice == 6:
+            return
+        elif choice == 0:
+            quit_game()
+
+
+# ============================================================================
+# STREET DEAL
+# ============================================================================
+
+def police_event():
+    """Handle police encounter during street deal."""
+    global drugs, money, risk
+
+    slow_print("Police spotted you!")
+
+    if random.randint(1, 100) < 50:
+        lost = min(sum(drugs.values()), 2)
+        # Remove from random drug types
+        for _ in range(lost):
+            available = [d for d, c in drugs.items() if c > 0]
+            if available:
+                drug_to_remove = random.choice(available)
+                drugs[drug_to_remove] -= 1
+        slow_print(f"You dropped {lost} drugs escaping!")
+    else:
+        fine = min(money, 50)
+        money -= fine
+        slow_print(f"You paid ${fine} fine.")
+
+    risk += 15
+    check_for_arrest()
+
+
+def street_deal():
+    """Sell drugs on the street in different territories."""
+    global drugs, money, risk, reputation, total_earned
+
+    # Check if player has any drugs
+    available_drugs = [d for d in unlocked_drugs if drugs.get(d, 0) > 0]
+    if not available_drugs:
+        slow_print("You have no drugs.")
+        return
+
+    # Customer randomly requests multiple drugs based on level (capped at 10)
+    max_order = min(level, 10)
+    order_amount = random.randint(1, max_order)
+    
+    requested_drug = random.choice(available_drugs)
+    sell_price = get_sale_price(requested_drug, order_amount)
+
+    print(f"\n[?] A customer approaches wanting {order_amount} {requested_drug}")
+    print(f"They'll pay ${sell_price} each (${sell_price * order_amount} total)")
+
+    print("\nChoose Territory:")
+    areas = list(TERRITORIES.keys())
+    for i, area in enumerate(areas):
+        print(f"{i+1}. {area}")
+
+    # Safe input protection
+    try:
+        territory_choice = int(input("Choose territory: ")) - 1
+        if territory_choice < 0 or territory_choice >= len(areas):
+            slow_print("Invalid territory.")
+            return
+    except ValueError:
+        slow_print("Please enter a valid number.")
+        return
+
+    area = areas[territory_choice]
+    data = TERRITORIES[area]
+    chance = random.randint(1, 100)
+
+    if chance < 60:
+        # Successful sale
+        if drugs[requested_drug] >= order_amount:
+            drugs[requested_drug] -= order_amount
+            revenue = sell_price * order_amount
+            total_earned += revenue
+            money += revenue
+            add_xp(25 * order_amount)
+            reputation += 3 * order_amount
+            check_objectives()
+
+            risk_gain = data["risk"]
+            if upgrades["Police Bribe"]:
+                risk_gain = int(risk_gain * 0.7)
+
+            risk += risk_gain
+            check_for_arrest()
+
+            slow_print(f"Sold {order_amount} {requested_drug} for ${revenue}")
+        else:
+            slow_print(f"You don't have enough {requested_drug}! (Need {order_amount}, have {drugs[requested_drug]})")
+
+    elif chance < 85:
+        # No customers
+        slow_print("No customers found.")
+        risk += 5
+        check_for_arrest()
+
+    else:
+        # Police encounter
+        police_event()
+
+
+# ============================================================================
+# SUPPLIER
+# ============================================================================
+
+def supplier():
+    """Buy seeds and growing solution from supplier with a polished menu layout."""
+    global money, seeds, growing_solution, risk, reputation, level, supplier_visited_today
+
+    if supplier_visited_today:
+        slow_print("You already visited the supplier today. Come back tomorrow.")
+        return
+
+    while True:
+        clear_screen()
+        render_panel("SUPPLIER", [("Money", f"${money}"), ("Risk", f"{risk}%")])
+
+        seed_options = []
+        options = []
+        for drug_name in DRUG_CONFIG.keys():
+            config = DRUG_CONFIG[drug_name]
+            if level >= config["unlock_level"]:
+                station_needed = config.get("station", "Grow Room")
+                if not stations.get(station_needed, False):
+                    continue
+                if config.get("has_recipe", False) and not recipes.get(drug_name, False):
+                    continue
+                price = get_seed_price(drug_name)
+                seed_options.append((drug_name, config["seed_name"], price))
+                options.append(f"{len(options) + 1}. {config['seed_name']} (${price} each)")
+
+        if not seed_options:
+            slow_print("No seeds available yet. You need to buy a station first!")
+            return
+
+        options.append(f"{len(options) + 1}. Leave")
+        render_menu("AVAILABLE SEEDS", options)
+
+        choice = input_number("Choose: ", list(range(1, len(options) + 1)))
+
+        if choice == len(options):
+            return
+
+        drug_name, seed_name, seed_price = seed_options[choice - 1]
+
+        if random.randint(1, 100) < 20:
+            seed_price = int(seed_price * 0.7)
+            slow_print("Supplier gives you a discount!")
+
+        try:
+            amount = int(input(f"How many {seed_name}? "))
+        except ValueError:
+            slow_print("Invalid number.")
+            continue
+
+        total = seed_price * amount
+
+        if money < total:
+            slow_print("Not enough money.")
+            continue
+
+        if random.randint(1, 100) < 10:
+            lost = int(total * 0.5)
+            money -= lost
+            slow_print(f"[!] You got scammed! Lost ${lost}")
+            supplier_visited_today = True
+            return
+
+        money -= total
+        seeds[drug_name] = seeds.get(drug_name, 0) + amount
+        supplier_visited_today = True
+        slow_print(f"You bought {amount} {seed_name}.")
+
+        risk_increase = random.randint(2, 6)
+        risk += risk_increase
+        slow_print(f"[!] Risk increased by {risk_increase}%")
+
+        check_for_arrest()
+        break
+
+
+# ============================================================================
+# BLACK MARKET
+# ============================================================================
+
+def black_market():
+    """Black market menu with polished number-based layout."""
+    global drugs, money, risk, reputation
+
+    while True:
+        clear_screen()
+        render_panel("BLACK MARKET", [("Money", f"${money}"), ("Risk", f"{risk}%"), ("Rep", reputation)])
+        render_menu("BLACK MARKET", [
+            "1. Sell Drugs",
+            "2. Buy Stations & Recipes",
+            "3. Leave",
+        ])
+
+        choice = input_number("Choose: ", [1, 2, 3])
+
+        if choice == 1:
+            sell_drugs_black_market()
+        elif choice == 2:
+            buy_stations_recipes()
+        elif choice == 3:
+            return
+
+
+def sell_drugs_black_market():
+    """Sell drugs at high risk high reward black market."""
+    global drugs, money, risk, reputation, total_earned
+
+    if reputation < 20:
+        slow_print("You are not known enough.")
+        return
+
+    # Check if player has any drugs
+    available_drugs = [d for d in unlocked_drugs if drugs.get(d, 0) > 0]
+    if not available_drugs:
+        slow_print("You have no drugs.")
+        return
+
+    # Customer randomly requests multiple drugs based on level (capped at 10)
+    max_order = min(level, 10)
+    order_amount = random.randint(1, max_order)
+    
+    requested_drug = random.choice(available_drugs)
+    sell_price = get_sale_price(requested_drug, order_amount, multiplier=1.5)
+
+    print(f"\n[$] Black market buyer wants {order_amount} {requested_drug}")
+    print(f"They'll pay ${sell_price} each (${sell_price * order_amount} total)")
+
+    print("\n1. Sell")
+    print("2. Cancel")
+
+    choice = input("Choose: ")
+
+    if choice == "1":
+        if drugs[requested_drug] >= order_amount:
+            drugs[requested_drug] -= order_amount
+            revenue = sell_price * order_amount
+            total_earned += revenue
+            money += revenue
+            add_xp(40 * order_amount)
+            risk += 30
+            check_for_arrest()
+            check_objectives()
+            slow_print(f"Black Market Sale: {order_amount} {requested_drug} sold for ${revenue}")
+        else:
+            slow_print(f"You don't have enough {requested_drug}! (Need {order_amount}, have {drugs[requested_drug]})")
+    else:
+        slow_print("You declined the deal.")
+
+
+def buy_stations_recipes():
+    """Buy stations and recipes from the black market with a cleaner menu."""
+    global money, stations, recipes
+
+    while True:
+        clear_screen()
+        station_prices = {"Grow Room": 500, "Lab": 800}
+        recipe_prices = {"Cocaine": 300}
+
+        render_panel("BLACK MARKET - STOCK", [("Money", f"${money}"), ("Rep", reputation)])
+
+        station_options = []
+        recipe_options = []
+        menu_rows = []
+
+        for station_name, price in station_prices.items():
+            owned = stations.get(station_name, False)
+            if owned:
+                menu_rows.append(f"{len(menu_rows) + 1}. {station_name}: OWNED")
+            elif station_name == "Lab" and level < 3:
+                menu_rows.append(f"{len(menu_rows) + 1}. {station_name}: LOCKED (Level 3)")
+            else:
+                menu_rows.append(f"{len(menu_rows) + 1}. {station_name}: ${price}")
+                station_options.append((station_name, price))
+
+        for drug_name, price in recipe_prices.items():
+            owned = recipes.get(drug_name, False)
+            if owned:
+                menu_rows.append(f"{len(menu_rows) + 1}. {drug_name} Recipe: OWNED")
+            elif drug_name == "Cocaine" and level < 5:
+                menu_rows.append(f"{len(menu_rows) + 1}. {drug_name} Recipe: LOCKED (Level 5)")
+            elif stations.get(DRUG_CONFIG[drug_name].get("station", "Grow Room"), False):
+                menu_rows.append(f"{len(menu_rows) + 1}. {drug_name} Recipe: ${price}")
+                recipe_options.append((drug_name, price))
+
+        menu_rows.append(f"{len(menu_rows) + 1}. Leave")
+        render_menu("STATIONS & RECIPES", menu_rows)
+
+        choice = input_number("Choose: ", list(range(1, len(menu_rows) + 1)))
+        if choice == len(menu_rows):
+            return
+
+        if choice <= len(station_options):
+            station_name, price = station_options[choice - 1]
+            if money >= price:
+                money -= price
+                stations[station_name] = True
+                slow_print(f"You bought the {station_name}!")
+            else:
+                slow_print("Not enough money.")
+        else:
+            recipe_index = choice - len(station_options) - 1
+            if 0 <= recipe_index < len(recipe_options):
+                drug_name, price = recipe_options[recipe_index]
+                if money >= price:
+                    money -= price
+                    recipes[drug_name] = True
+                    slow_print(f"You bought the {drug_name} recipe!")
+                else:
+                    slow_print("Not enough money.")
+            else:
+                slow_print("Invalid choice.")
+
+        return
+
+
+# ============================================================================
+# UPGRADES
+# ============================================================================
+
+def upgrade_menu():
+    """Purchase base upgrades with a cleaner terminal layout."""
+    global money, max_production
+
+    while True:
+        clear_screen()
+        available = []
+        if not upgrades["Safe House"]:
+            available.append("1. Safe House ($200)")
+        if not upgrades["Police Bribe"]:
+            available.append("2. Police Bribe ($150)")
+        if not upgrades["Chemist"]:
+            available.append("3. Hire Chemist ($300)")
+        if max_production < 20:
+            available.append("4. Production Upgrade ($250)")
+
+        purchased_count = sum([
+            upgrades["Safe House"],
+            upgrades["Police Bribe"],
+            upgrades["Chemist"],
+            max_production >= 20,
+        ])
+
+        if purchased_count == 4:
+            slow_print("All upgrades already purchased!")
+            return
+
+        available.append(f"{len(available) + 1}. Exit")
+        render_panel("UPGRADES", [("Money", f"${money}"), ("Production", max_production)])
+        render_menu("UPGRADE SHOP", available)
+
+        choice = input_number("Choose: ", list(range(1, len(available) + 1)))
+
+        if choice == 1 and not upgrades["Safe House"] and money >= 200:
+            money -= 200
+            upgrades["Safe House"] = True
+            slow_print("Safe House purchased! Risk from street deals reduced by 20%.")
+        elif choice == 2 and not upgrades["Police Bribe"] and money >= 150:
+            money -= 150
+            upgrades["Police Bribe"] = True
+            slow_print("Police Bribe purchased! Risk from street deals reduced by 30%.")
+        elif choice == 3 and not upgrades["Chemist"] and money >= 300:
+            money -= 300
+            upgrades["Chemist"] = True
+            slow_print("Chemist hired! Drug production doubled.")
+        elif choice == 4 and max_production < 20 and money >= 250:
+            money -= 250
+            max_production += 5
+            slow_print("Production capacity increased by 5!")
+        elif choice == len(available):
+            return
+        else:
+            slow_print("Invalid choice or not enough money.")
+
+
+# ============================================================================
+# HOW TO PLAY & CREDITS
+# ============================================================================
+
+def how_to_play():
+    """Display game instructions."""
+    slow_print("\n========== HOW TO PLAY ==========")
+    slow_print("\n--- YOUR BASE ---")
+    slow_print("Access your computer to manage your drug operation.")
+    slow_print("Buy seeds from the SUPPLIER to grow drugs.")
+    slow_print("Use DRUG STATIONS (Grow Room, Lab) to process drugs.")
+    slow_print("Check your inventory and upgrade your base.")
+    
+    slow_print("\n--- EMAILS ---")
+    slow_print("Check your emails to sell drugs to customers.")
+    slow_print("Customers will message you wanting to buy drugs.")
+    slow_print("Accept their offers to make sales!")
+    
+    slow_print("\n--- DRUG ZONE ---")
+    slow_print("The Drug Zone is where you sell drugs to customers.")
+    slow_print("Different customers offer different prices.")
+    slow_print("Some deals are risky - choose carefully!")
+    
+    slow_print("\n--- SUPPLIER ---")
+    slow_print("supplier offers seeds at different prices each vist.")
+    slow_print("Different drugs require different seeds:")
+    slow_print("  - Weed Seeds: $5-12 (Weed)")
+    slow_print("  - Meth Ingredients: $15-25 (Meth)")
+    slow_print("  - Coca Seeds: $30-50 (Cocaine)")
+    
+    slow_print("\n--- DEALS & SELLING ---")
+    slow_print("Make DEALS with customers in the city.")
+    slow_print("Each sale earns money but increases your risk level.")
+    slow_print("Build reputation to get better customers.")
+    
+    slow_print("\n--- BLACK MARKET ---")
+    slow_print("Access the Black Market to buy:")
+    slow_print("  - STATIONS: Grow Room ($500), Lab ($800)")
+    slow_print("  - RECIPES: Unlock new drug recipes")
+    slow_print("Note: Stations and recipes are be LEVEL LOCKED!")
+    
+    slow_print("\n--- UPGRADES ---")
+    slow_print("Improve your operation with upgrades:")
+    slow_print("  - Safe House: Reduces police detection risk")
+    slow_print("  - Police Bribe: Lower arrest probability")
+    slow_print("  - Chemist: Increases production speed")
+    slow_print("  - Production: Grow more drugs at once")
+    
+    slow_print("\n--- WORKERS ---")
+    slow_print("Hire workers to help automate your operation.")
+    slow_print("Workers can grow drugs and handle deliveries.")
+    
+    slow_print("\n--- SLEEPING ---")
+    slow_print("Sleep to advance to the next day.")
+    slow_print("New customers arrive each day.")
+    slow_print("Risk decreases slightly each day you stay low profile.")
+    
+    slow_print("\n--- TIPS ---")
+    slow_print("- Start with Weed, it's low risk")
+    slow_print("- Balance making money vs getting caught")
+    slow_print("- Check your level to unlock new content")
+    slow_print("- Save your game regularly!")
+    slow_print("- you shall discover the rest")
+    
+    input("\nPress Enter...")
+
+
+def credits():
+    """Display game credits."""
+    slow_print("\n========Credits=======")
+    very_slow_print("\nAll rights are reserved to Don'tDoDrugs.com(DDD.com)")
+    very_slow_print("Developers: Wahbi Bakbak, and Younes Alaska")
+    input("Press Enter...")
+
+
+# ============================================================================
+# GAME ENTRY POINT
+# ============================================================================
+
+slow_print("\nDrugs Are Not cool")
+slow_print("\nBy: Don'tDoDrugs.com")
+
+if __name__ == "__main__":
+    main_menu()
